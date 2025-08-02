@@ -9,5 +9,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "CustomWanVideoEnhancer_F2": "Custom Wan Video Enhancer (F2)"
+    "CustomWanVideoEnhancer_F2": "WanVideoEnhancer_F2"
 }
