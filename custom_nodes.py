@@ -1,24 +1,15 @@
 import os
 import torch
-from torch.hub import download_url_to_file
 import comfy.utils
 import folder_paths
-from spandrel import ModelLoader
-
-# Note: The .frame_interpolation module (IFNet, preprocess_frames, postprocess_frames, generic_frame_loop)
-# is assumed to be available in the project directory or installed as a dependency.
-from .frame_interpolation.rife_arch import IFNet
-from .frame_interpolation.utils import preprocess_frames, postprocess_frames, generic_frame_loop
-
-def clear_cuda_cache():
-    import gc
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+from torch.hub import download_url_to_file
+from spandrel import ModelLoader, ImageModelDescriptor
+import comfy.model_management as mm
+from comfy.utils import load_torch_file
 
 def download_github_model(repo_id, tag, file_name, saved_directory):
     download_url = f"https://github.com/{repo_id}/releases/download/{tag}/{file_name}"
+
     saved_directory = os.path.join(folder_paths.models_dir, saved_directory)
     saved_full_path = os.path.join(saved_directory, file_name)
     if os.path.exists(saved_full_path):
@@ -28,14 +19,23 @@ def download_github_model(repo_id, tag, file_name, saved_directory):
         os.makedirs(saved_directory, exist_ok=True)
     
     print(f"Downloading the {file_name} model. Please wait a moment...")
+
     download_url_to_file(download_url, saved_full_path, hash_prefix=None, progress=True)
+
     return saved_full_path
+
+def clear_cuda_cache():
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 class WanVideoEnhancer_F2:
     @classmethod
     def INPUT_TYPES(s):
         return {
-            "required": {
+            "required":{
                 "images": ("IMAGE", ),
                 "upscale_model": (["disabled"] + folder_paths.get_filename_list("upscale_models"), ),
                 "interpolate_model": (("disabled", "rife47.pth", "rife48.pth", "rife49.pth"), ), 
@@ -60,6 +60,7 @@ class WanVideoEnhancer_F2:
             interpolate_frame,
             order,
         ):
+
         def upscale(images):
             return self.upscale(upscale_model, images, upscale_factor)
 
@@ -75,6 +76,7 @@ class WanVideoEnhancer_F2:
             images = k(images)
 
         framerate = interpolate_frame if interpolate_model != "disabled" else 16
+
         return (images, framerate, )
 
     def interpolate(self, model_name, images, framerate):
@@ -82,20 +84,23 @@ class WanVideoEnhancer_F2:
             print("No interpolation model specified. Skipping interpolation.")
             return images
 
+        from .frame_interpolation.rife_arch import IFNet
+        from .frame_interpolation.utils import preprocess_frames, postprocess_frames, generic_frame_loop
         model_path = download_github_model("styler00dollar/VSGAN-tensorrt-docker", "models", model_name, "vfi_models")
         model = IFNet(arch_ver="4.7")
         sd = torch.load(model_path)
         model.load_state_dict(sd)
         del sd
-        model.eval().to(torch.cuda.current_device() if torch.cuda.is_available() else "cpu")
+        model.eval().to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         frames = preprocess_frames(images)
         
         print("interpolating...")
-        clear_cache_after_n_frames = 10
-        multiplier = int(framerate / 15)
-        
+
         def return_middle_frame(frame_0, frame_1, timestep, model, scale_list, in_fast_mode, in_ensemble):
             return model(frame_0, frame_1, timestep, scale_list, in_fast_mode, in_ensemble)
+        
+        clear_cache_after_n_frames = 10
+        multiplier = int(framerate / 15)
         
         args = [model, [8, 4, 2, 1], True, True]
         images = postprocess_frames(
@@ -110,7 +115,9 @@ class WanVideoEnhancer_F2:
                 dtype=torch.float32,
             )
         )
+
         clear_cuda_cache()
+        
         return images
 
     def upscale(self, model_name, images, factor):
@@ -130,17 +137,20 @@ class WanVideoEnhancer_F2:
             raise Exception("Upscale model must be a single-image model.")
         
         print("upscaling...")
+
         scale = model.scale
-        memory_required = comfy.model_management.module_size(model.model)
+
+        memory_required = mm.module_size(model.model)
         memory_required += (512 * 512 * 3) * images.element_size() * max(scale, 1.0) * 384.0
         memory_required += images.nelement() * images.element_size()
-        comfy.model_management.free_memory(memory_required, torch.cuda.current_device() if torch.cuda.is_available() else "cpu")
+        mm.free_memory(memory_required, torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-        model.to(torch.cuda.current_device() if torch.cuda.is_available() else "cpu")
-        in_img = images.movedim(-1, -3).to(torch.cuda.current_device() if torch.cuda.is_available() else "cpu")
+        model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        in_img = images.movedim(-1, -3).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
         tile = 512
         overlap = 32
+
         oom = True
         while oom:
             try:
@@ -148,15 +158,19 @@ class WanVideoEnhancer_F2:
                 pbar = comfy.utils.ProgressBar(steps)
                 s = comfy.utils.tiled_scale(in_img, lambda a: model(a), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=scale, pbar=pbar)
                 oom = False
-            except comfy.model_management.OOM_EXCEPTION as e:
+            except mm.OOM_EXCEPTION as e:
                 tile //= 2
                 if tile < 128:
                     raise e
                 
         del model
+
         clear_cuda_cache()
+
         s = torch.clamp(s.movedim(-3, -1), min=0, max=1.0)
+
         scale_by = factor / scale
+
         samples = s.movedim(-1, 1)
         width = round(samples.shape[3] * scale_by)
         height = round(samples.shape[2] * scale_by)
